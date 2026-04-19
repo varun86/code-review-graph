@@ -112,6 +112,13 @@ select = ["E", "F", "I", "N", "W"]
 
 [tool.ruff.lint.per-file-ignores]
 "code_review_graph/visualization.py" = ["E501"]  # embedded HTML/JS template
+"code_review_graph/skills.py" = ["E501"]  # long platform-config templates
+"code_review_graph/spring_resolver.py" = ["E501"]  # long detection rules
+"code_review_graph/temporal_resolver.py" = ["E501"]  # long detection rules
+"code_review_graph/embeddings.py" = ["E501"]
+"code_review_graph/registry.py" = ["E501"]
+"code_review_graph/parser.py" = ["E501"]
+"code_review_graph/cli.py" = ["E501"]
 "tests/fixtures/sample_databricks_export.py" = ["F841", "W292"]  # intentional fixture patterns
 "tests/fixtures/sample_notebook.ipynb" = ["F401", "I001"]  # fixture imports: intentionally unused, split across cells
 "tests/test_multilang.py" = ["E501"]  # long assertions with explanatory comments

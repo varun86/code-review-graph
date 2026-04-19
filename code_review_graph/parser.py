@@ -4122,7 +4122,7 @@ class CodeParser:
                     edges.append(EdgeInfo(
                         kind="CONSUMES",
                         source=qualified_source,
-                        target=f"kafka:config",
+                        target="kafka:config",
                         file_path=file_path,
                         line=member.start_point[0] + 1,
                         extra=extra,
@@ -4132,7 +4132,7 @@ class CodeParser:
                     edges.append(EdgeInfo(
                         kind="PRODUCES",
                         source=qualified_source,
-                        target=f"kafka:config",
+                        target="kafka:config",
                         file_path=file_path,
                         line=member.start_point[0] + 1,
                         extra=extra,

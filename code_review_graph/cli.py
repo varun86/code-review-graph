@@ -229,12 +229,12 @@ def _handle_init(args: argparse.Namespace) -> None:
     from .skills import (
         PLATFORMS,
         generate_skills,
-        install_gemini_cli_hooks,
-        install_gemini_cli_skills,
         inject_claude_md,
         inject_platform_instructions,
         install_codex_hooks,
         install_cursor_hooks,
+        install_gemini_cli_hooks,
+        install_gemini_cli_skills,
         install_git_hook,
         install_hooks,
         install_opencode_plugin,
@@ -1029,13 +1029,13 @@ def main() -> None:
 
                     serve_dir = html_path.parent
                     port = 8765
-                    handler = functools.partial(
+                    http_handler = functools.partial(
                         http.server.SimpleHTTPRequestHandler,
                         directory=str(serve_dir),
                     )
                     print(f"Serving at http://localhost:{port}/graph.html")
                     print("Press Ctrl+C to stop.")
-                    with http.server.HTTPServer(("localhost", port), handler) as httpd:
+                    with http.server.HTTPServer(("localhost", port), http_handler) as httpd:
                         try:
                             httpd.serve_forever()
                         except KeyboardInterrupt:

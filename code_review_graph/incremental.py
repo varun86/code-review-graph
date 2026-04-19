@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
@@ -232,7 +233,7 @@ def find_project_root(
 
 def _write_data_dir_gitignore(data_dir: Path) -> None:
     """Write .gitignore file in data directory if it doesn't exist.
-    
+
     The gitignore contains a single '*' to prevent accidental commits.
     """
     inner_gitignore = data_dir / ".gitignore"
