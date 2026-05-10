@@ -3969,6 +3969,93 @@ class CodeParser:
                         extra=extra,
                     ))
 
+    def _emit_spring_config_edges(
+        self,
+        class_node,
+        class_name: str,
+        class_annotations: list[str],
+        file_path: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit DEPENDS_ON_CONFIG edges for Spring config injection points.
+
+        Handles two patterns:
+        - @Value("${property.key}") on fields — one edge per property key
+        - @ConfigurationProperties(prefix="...") on the class — one edge per prefix
+        """
+        qualified_source = self._qualify(class_name, file_path, None)
+
+        # Class-level @ConfigurationProperties
+        if "ConfigurationProperties" in class_annotations:
+            for node in class_node.children:
+                if node.type != "modifiers":
+                    continue
+                for mod in node.children:
+                    if mod.type != "annotation":
+                        continue
+                    ann_name = ""
+                    for sub in mod.children:
+                        if sub.type == "identifier":
+                            ann_name = sub.text.decode("utf-8", errors="replace")
+                            break
+                    if ann_name != "ConfigurationProperties":
+                        continue
+                    prefix = ""
+                    for sub in mod.children:
+                        if sub.type == "annotation_argument_list":
+                            raw = sub.text.decode("utf-8", errors="replace")
+                            m = re.search(r'prefix\s*=\s*"([^"]+)"', raw)
+                            if m:
+                                prefix = m.group(1)
+                            else:
+                                m2 = re.search(r'"([^"]+)"', raw)
+                                if m2:
+                                    prefix = m2.group(1)
+                    if prefix:
+                        edges.append(EdgeInfo(
+                            kind="DEPENDS_ON_CONFIG",
+                            source=qualified_source,
+                            target=f"config:{prefix}.*",
+                            file_path=file_path,
+                            line=class_node.start_point[0] + 1,
+                            extra={"resolution": "configuration_properties", "confidence": 1.0},
+                        ))
+
+        # Field-level @Value("${property.key}")
+        for node in class_node.children:
+            if node.type != "class_body":
+                continue
+            for member in node.children:
+                if member.type != "field_declaration":
+                    continue
+                for child in member.children:
+                    if child.type != "modifiers":
+                        continue
+                    for mod in child.children:
+                        if mod.type != "annotation":
+                            continue
+                        ann_name = ""
+                        ann_value = ""
+                        for sub in mod.children:
+                            if sub.type == "identifier":
+                                ann_name = sub.text.decode("utf-8", errors="replace")
+                            elif sub.type == "annotation_argument_list":
+                                ann_value = sub.text.decode("utf-8", errors="replace")
+                        if ann_name != "Value":
+                            continue
+                        m = re.search(r'\$\{([^}]+)\}', ann_value)
+                        if not m:
+                            continue
+                        prop_key = m.group(1).split(":")[0].strip()
+                        edges.append(EdgeInfo(
+                            kind="DEPENDS_ON_CONFIG",
+                            source=qualified_source,
+                            target=f"config:{prop_key}",
+                            file_path=file_path,
+                            line=member.start_point[0] + 1,
+                            extra={"resolution": "value_annotation", "confidence": 1.0},
+                        ))
+
     def _emit_temporal_stub_fields(
         self,
         class_node,
@@ -4281,6 +4368,10 @@ class CodeParser:
             self._emit_spring_injections(
                 child, name, class_annotations, language, file_path, edges,
             )
+            # Config: emit DEPENDS_ON_CONFIG edges for @Value / @ConfigurationProperties
+            self._emit_spring_config_edges(
+                child, name, class_annotations, file_path, edges,
+            )
             # Temporal: emit TEMPORAL_STUB edges for activity/workflow stub fields
             self._emit_temporal_stub_fields(child, name, file_path, edges)
             # Kafka: emit CONSUMES/PRODUCES edges for Kafka field declarations
@@ -4362,6 +4453,8 @@ class CodeParser:
 
         # Java: detect Temporal method-level annotations and Kafka listeners
         method_extra: dict = {}
+        if deco_list:
+            method_extra["decorators"] = deco_list
         if language == "java" and deco_list:
             temporal_method_annots = [
                 a for a in deco_list if a in _TEMPORAL_METHOD_ANNOTATIONS

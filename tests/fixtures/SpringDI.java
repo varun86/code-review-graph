@@ -76,3 +76,22 @@ class Order {
     private Long id;
     public Long getId() { return id; }
 }
+
+// @Value field injection — two distinct property keys
+@Service
+class PaymentService {
+    @Value("${payment.gateway.url}")
+    private String gatewayUrl;
+
+    @Value("${payment.timeout.seconds:30}")
+    private int timeoutSeconds;
+
+    public void process() {}
+}
+
+// @ConfigurationProperties class
+@ConfigurationProperties(prefix = "app.kafka")
+class KafkaConfigProperties {
+    private String bootstrapServers;
+    private String topic;
+}

@@ -2127,6 +2127,29 @@ class TestSpringDIParsing:
         assert any("save" in t for t in targets), f"expected 'save' in targets, got {targets}"
         # receiver variable names must NOT appear as CALLS targets
         assert "orderRepository" not in targets
+
+    def test_value_annotation_emits_depends_on_config_edges(self):
+        """@Value fields emit DEPENDS_ON_CONFIG edges with the property key as target."""
+        config_edges = [e for e in self.edges if e.kind == "DEPENDS_ON_CONFIG"]
+        targets = {e.target for e in config_edges}
+        assert "config:payment.gateway.url" in targets
+        # Default-value syntax ${key:default} — only the key part is used
+        assert "config:payment.timeout.seconds" in targets
+
+    def test_value_annotation_resolution_metadata(self):
+        """DEPENDS_ON_CONFIG edges from @Value carry value_annotation resolution."""
+        config_edges = [e for e in self.edges if e.kind == "DEPENDS_ON_CONFIG"
+                        and e.extra.get("resolution") == "value_annotation"]
+        assert len(config_edges) >= 2
+        for e in config_edges:
+            assert e.extra.get("confidence") == 1.0
+
+    def test_configuration_properties_emits_depends_on_config_edge(self):
+        """@ConfigurationProperties(prefix=...) emits a DEPENDS_ON_CONFIG edge for the prefix."""
+        config_edges = [e for e in self.edges if e.kind == "DEPENDS_ON_CONFIG"
+                        and e.extra.get("resolution") == "configuration_properties"]
+        targets = {e.target for e in config_edges}
+        assert "config:app.kafka.*" in targets
         assert "notificationService" not in targets
 
     def test_java_receiver_stored_in_calls_extra(self):

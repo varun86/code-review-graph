@@ -141,6 +141,40 @@ class TestFlows:
         ep_names = {ep.name for ep in eps}
         assert "process_data" in ep_names
 
+    def test_detect_entry_points_kafka_listener(self):
+        """Java @KafkaListener marks function as entry point."""
+        self._add_func("handleOrder", extra={"decorators": ['KafkaListener(topics = "order.created")']})
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "handleOrder" in ep_names
+
+    def test_detect_entry_points_workflow_method(self):
+        """Temporal @WorkflowMethod marks function as entry point."""
+        self._add_func("startWorkflow", extra={"decorators": ["WorkflowMethod"]})
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "startWorkflow" in ep_names
+
+    def test_detect_entry_points_webflux_router_function(self):
+        """WebFlux @Bean method returning RouterFunction<ServerResponse> is an entry point."""
+        from code_review_graph.parser import NodeInfo
+        node = NodeInfo(
+            kind="Function",
+            name="routes",
+            file_path="app.py",
+            line_start=1,
+            line_end=10,
+            language="java",
+            parent_name=None,
+            return_type="RouterFunction<ServerResponse>",
+            extra={"decorators": ["Bean"]},
+        )
+        self.store.upsert_node(node, file_hash="abc")
+        self.store.commit()
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "routes" in ep_names
+
     def test_detect_entry_points_agent_tool(self):
         """@agent.tool decorator marks function as entry point."""
         self._add_func("query_health", extra={"decorators": ["health_agent.tool"]})

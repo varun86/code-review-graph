@@ -46,9 +46,16 @@ _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(override_settings|modify_settings)", re.IGNORECASE),
     # SQLAlchemy / event systems
     re.compile(r"(event\.)?listens_for", re.IGNORECASE),
-    # Java Spring
+    # Java Spring MVC / WebFlux annotation-based
     re.compile(r"(Get|Post|Put|Delete|Patch|RequestMapping)Mapping", re.IGNORECASE),
     re.compile(r"(Scheduled|EventListener|Bean|Configuration)", re.IGNORECASE),
+    re.compile(r"RestController", re.IGNORECASE),
+    # Spring Kafka / Temporal entry points
+    re.compile(r"KafkaListener", re.IGNORECASE),
+    re.compile(r"(WorkflowMethod|ActivityMethod)", re.IGNORECASE),
+    # Spring WebFlux functional routing (RouterFunction / route().GET())
+    re.compile(r"RouterFunction", re.IGNORECASE),
+    re.compile(r"HandlerFunction", re.IGNORECASE),
     # JS/TS frameworks
     re.compile(r"(Component|Injectable|Controller|Module|Guard|Pipe)", re.IGNORECASE),
     re.compile(r"(Subscribe|Mutation|Query|Resolver)", re.IGNORECASE),
@@ -115,17 +122,22 @@ _ENTRY_NAME_PATTERNS: list[re.Pattern[str]] = [
 # ---------------------------------------------------------------------------
 
 
+_WEBFLUX_RETURN_TYPE_RE = re.compile(r"RouterFunction", re.IGNORECASE)
+
+
 def _has_framework_decorator(node: GraphNode) -> bool:
     """Return True if *node* has a decorator matching a framework pattern."""
     decorators = node.extra.get("decorators")
-    if not decorators:
-        return False
-    if isinstance(decorators, str):
-        decorators = [decorators]
-    for dec in decorators:
-        for pat in _FRAMEWORK_DECORATOR_PATTERNS:
-            if pat.search(dec):
-                return True
+    if decorators:
+        if isinstance(decorators, str):
+            decorators = [decorators]
+        for dec in decorators:
+            for pat in _FRAMEWORK_DECORATOR_PATTERNS:
+                if pat.search(dec):
+                    return True
+    # WebFlux functional routing: @Bean methods returning RouterFunction<ServerResponse>
+    if node.return_type and _WEBFLUX_RETURN_TYPE_RE.search(node.return_type):
+        return True
     return False
 
 

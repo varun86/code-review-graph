@@ -270,19 +270,20 @@ def query_graph(
                         results.append(node_to_dict(child))
 
         elif pattern == "tests_for":
-            for e in store.get_edges_by_target(qn):
-                if e.kind == "TESTED_BY":
-                    test = store.get_node(e.source_qualified)
-                    if test:
-                        results.append(node_to_dict(test))
-            # Also search by naming convention
+            transitive = store.get_transitive_tests(qn, max_depth=3)
+            seen: set[str] = set()
+            for t in transitive:
+                qn_t = t.get("qualified_name", "")
+                if qn_t not in seen:
+                    seen.add(qn_t)
+                    results.append(t)
+            # Naming-convention fallback for tests not linked by TESTED_BY edges
             name = node.name if node else target
-            test_nodes = store.search_nodes(f"test_{name}", limit=10)
-            test_nodes += store.search_nodes(f"Test{name}", limit=10)
-            seen = {r.get("qualified_name") for r in results}
-            for t in test_nodes:
-                if t.qualified_name not in seen and t.is_test:
-                    results.append(node_to_dict(t))
+            for prefix in (f"test_{name}", f"Test{name}"):
+                for t in store.search_nodes(prefix, limit=10):
+                    if t.qualified_name not in seen and t.is_test:
+                        seen.add(t.qualified_name)
+                        results.append(node_to_dict(t))
 
         elif pattern == "inheritors_of":
             for e in store.get_edges_by_target(qn):
