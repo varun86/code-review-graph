@@ -518,6 +518,9 @@ _KAFKA_PRODUCER_TYPES = frozenset({
     "KafkaSender",
 })
 
+# Spring scheduling annotation
+_SPRING_SCHEDULED_ANNOTATIONS = frozenset({"Scheduled"})
+
 
 # ---------------------------------------------------------------------------
 # ReScript regex patterns and helpers (no tree-sitter grammar bundled)
@@ -4111,6 +4114,71 @@ class CodeParser:
                                     topics.append(raw)
         return topics
 
+    def _emit_scheduled_edges_from_method(
+        self,
+        method_node,
+        method_name: str,
+        class_name: Optional[str],
+        file_path: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit TRIGGERS edge from a virtual SCHEDULER node for @Scheduled methods."""
+        for child in method_node.children:
+            if child.type != "modifiers":
+                continue
+            for mod in child.children:
+                if mod.type not in ("annotation", "marker_annotation"):
+                    continue
+                ann_name: Optional[str] = None
+                for sub in mod.children:
+                    if sub.type == "identifier":
+                        ann_name = sub.text.decode("utf-8", errors="replace")
+                        break
+                if ann_name not in _SPRING_SCHEDULED_ANNOTATIONS:
+                    continue
+
+                schedule_extra: dict = {"annotation": "Scheduled"}
+                scheduler_id = "SCHEDULER::scheduled"
+
+                for arg_list in mod.children:
+                    if arg_list.type != "annotation_argument_list":
+                        continue
+                    for pair in arg_list.children:
+                        if pair.type != "element_value_pair":
+                            continue
+                        key_node = next(
+                            (c for c in pair.children if c.type == "identifier"), None
+                        )
+                        val_node = next(
+                            (c for c in pair.children
+                             if c.type in ("string_literal",
+                                           "decimal_integer_literal",
+                                           "hex_integer_literal",
+                                           "decimal_floating_point_literal")),
+                            None,
+                        )
+                        if not (key_node and val_node):
+                            continue
+                        key = key_node.text.decode("utf-8", errors="replace")
+                        val = val_node.text.decode("utf-8", errors="replace").strip('"')
+                        schedule_extra[key] = val
+                        if key == "cron":
+                            scheduler_id = "SCHEDULER::cron"
+                        elif key in ("fixedRate", "fixedRateString"):
+                            scheduler_id = "SCHEDULER::fixedRate"
+                        elif key in ("fixedDelay", "fixedDelayString"):
+                            scheduler_id = "SCHEDULER::fixedDelay"
+
+                qualified_target = self._qualify(method_name, file_path, class_name)
+                edges.append(EdgeInfo(
+                    kind="TRIGGERS",
+                    source=scheduler_id,
+                    target=qualified_target,
+                    file_path=file_path,
+                    line=method_node.start_point[0] + 1,
+                    extra=schedule_extra,
+                ))
+
     def _emit_kafka_edges_from_class(
         self,
         class_node,
@@ -4442,6 +4510,11 @@ class CodeParser:
             if any(a.split("(")[0] in _KAFKA_LISTENER_ANNOTATIONS for a in deco_list):
                 method_extra["kafka_listener"] = True
                 self._emit_kafka_edges_from_method(
+                    child, name, enclosing_class, file_path, edges,
+                )
+            if any(a.split("(")[0] in _SPRING_SCHEDULED_ANNOTATIONS for a in deco_list):
+                method_extra["scheduled"] = True
+                self._emit_scheduled_edges_from_method(
                     child, name, enclosing_class, file_path, edges,
                 )
 

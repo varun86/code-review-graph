@@ -2041,6 +2041,67 @@ class TestNixParsing:
             )
 
 
+class TestSpringScheduledParsing:
+    """Tests for @Scheduled annotation detection and TRIGGERS edge generation."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(
+            FIXTURES / "ScheduledTasks.java"
+        )
+
+    def test_cron_scheduled_emits_triggers_edge(self):
+        triggers = [e for e in self.edges if e.kind == "TRIGGERS"]
+        cron_edges = [e for e in triggers if e.source == "SCHEDULER::cron"]
+        assert cron_edges, "Expected TRIGGERS edge with source SCHEDULER::cron"
+        targets = {e.target for e in cron_edges}
+        assert any("generateDailyReport" in t for t in targets)
+
+    def test_fixed_rate_scheduled_emits_triggers_edge(self):
+        triggers = [e for e in self.edges if e.kind == "TRIGGERS"]
+        fixed_edges = [e for e in triggers if e.source == "SCHEDULER::fixedRate"]
+        assert fixed_edges, "Expected TRIGGERS edge with source SCHEDULER::fixedRate"
+        targets = {e.target for e in fixed_edges}
+        assert any("syncInventory" in t for t in targets)
+
+    def test_fixed_delay_scheduled_emits_triggers_edge(self):
+        triggers = [e for e in self.edges if e.kind == "TRIGGERS"]
+        delay_edges = [e for e in triggers if e.source == "SCHEDULER::fixedDelay"]
+        assert delay_edges
+        targets = {e.target for e in delay_edges}
+        assert any("cleanupExpiredSessions" in t for t in targets)
+
+    def test_cron_value_stored_in_extra(self):
+        triggers = [e for e in self.edges if e.kind == "TRIGGERS"
+                    and e.source == "SCHEDULER::cron"]
+        assert triggers
+        assert triggers[0].extra.get("cron") == "0 0 8 * * MON-FRI"
+
+    def test_fixedrate_value_stored_in_extra(self):
+        triggers = [e for e in self.edges if e.kind == "TRIGGERS"
+                    and e.source == "SCHEDULER::fixedRate"]
+        assert triggers
+        assert triggers[0].extra.get("fixedRate") == "60000"
+
+    def test_non_scheduled_method_no_triggers_edge(self):
+        """helperMethod has no @Scheduled — must not produce a TRIGGERS edge."""
+        triggers = [e for e in self.edges if e.kind == "TRIGGERS"]
+        targets = {e.target for e in triggers}
+        assert not any("helperMethod" in t for t in targets)
+
+    def test_total_triggers_edge_count(self):
+        triggers = [e for e in self.edges if e.kind == "TRIGGERS"]
+        # ReportScheduler has 3 @Scheduled methods
+        assert len(triggers) == 3
+
+    def test_scheduled_method_extra_flag(self):
+        """Function nodes for @Scheduled methods should carry extra.scheduled=True."""
+        funcs = {n.name: n for n in self.nodes if n.kind == "Function"}
+        assert funcs["generateDailyReport"].extra.get("scheduled") is True
+        assert funcs["syncInventory"].extra.get("scheduled") is True
+        assert "scheduled" not in funcs.get("helperMethod", type("", (), {"extra": {}})()).extra
+
+
 class TestSpringDIParsing:
     """Tests for Spring DI annotation detection and INJECTS edge generation."""
 
