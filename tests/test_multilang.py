@@ -389,6 +389,43 @@ class TestCSharpParsing:
         names = {f.name for f in funcs}
         assert "FindById" in names or "Save" in names
 
+    @pytest.mark.parametrize(
+        ("statement", "expected_targets"),
+        [
+            ("Ping();", {"Ping"}),
+            ("service.Send();", {"Send"}),
+            ("service.GetClient().Fetch();", {"GetClient", "Fetch"}),
+            ("service?.Notify();", {"Notify"}),
+        ],
+        ids=("bare", "member", "chained", "null-conditional"),
+    )
+    def test_finds_calls_and_attributes_them_to_enclosing_method(
+        self, tmp_path, statement, expected_targets,
+    ):
+        source_file = tmp_path / "Calls.cs"
+        source_file.write_text(
+            "class Caller\n"
+            "{\n"
+            "    void Run()\n"
+            "    {\n"
+            f"        {statement}\n"
+            "    }\n"
+            "}\n"
+        )
+
+        _, edges = self.parser.parse_file(source_file)
+        calls = [edge for edge in edges if edge.kind == "CALLS"]
+        call_targets = {
+            edge.target.split("::")[-1].split(".")[-1]: edge
+            for edge in calls
+        }
+
+        assert expected_targets <= call_targets.keys()
+        assert all(
+            call_targets[target].source.endswith("::Caller.Run")
+            for target in expected_targets
+        )
+
 
 class TestRubyParsing:
     def setup_method(self):

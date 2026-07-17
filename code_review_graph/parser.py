@@ -6605,7 +6605,8 @@ class CodeParser:
         member_types = (
             "attribute", "member_expression",
             "field_expression", "selector_expression",
-            "navigation_expression",
+            "navigation_expression", "member_access_expression",
+            "conditional_access_expression",
         )
         if first.type in member_types:
             # Get the rightmost identifier (the method name)
@@ -6619,6 +6620,10 @@ class CodeParser:
                 if child.type == "navigation_suffix":
                     for sub in child.children:
                         if sub.type == "simple_identifier":
+                            return sub.text.decode("utf-8", errors="replace")
+                if child.type == "member_binding_expression":
+                    for sub in child.children:
+                        if sub.type == "identifier":
                             return sub.text.decode("utf-8", errors="replace")
             return first.text.decode("utf-8", errors="replace")
 
