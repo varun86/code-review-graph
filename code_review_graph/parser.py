@@ -3373,6 +3373,56 @@ class CodeParser:
     # Julia-specific helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _julia_component_name(node) -> Optional[str]:
+        """Return an identifier or quoted operator component name."""
+        if node.type in ("identifier", "operator"):
+            return node.text.decode("utf-8", errors="replace")
+        if node.type in ("quote_expression", "parenthesized_expression"):
+            for child in node.children:
+                name = CodeParser._julia_component_name(child)
+                if name is not None:
+                    return name
+        return None
+
+    def _julia_field_parts(self, field_expr) -> list[str]:
+        """Flatten the identifier prefix of a Julia field expression."""
+        parts: list[str] = []
+        for child in field_expr.children:
+            if child.type == "field_expression":
+                parts.extend(self._julia_field_parts(child))
+            elif child.type == "identifier":
+                parts.append(
+                    child.text.decode("utf-8", errors="replace"),
+                )
+        return parts
+
+    def _julia_field_info(
+        self, field_expr,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Return ``(qualifier, leaf)`` for a Julia field expression."""
+        semantic_children = [
+            child for child in field_expr.children
+            if child.type in (
+                "field_expression",
+                "identifier",
+                "quote_expression",
+            )
+        ]
+        if not semantic_children:
+            return None, None
+        name = self._julia_component_name(semantic_children[-1])
+        qualifier_parts: list[str] = []
+        for child in semantic_children[:-1]:
+            if child.type == "field_expression":
+                qualifier_parts.extend(self._julia_field_parts(child))
+            elif child.type == "identifier":
+                qualifier_parts.append(
+                    child.text.decode("utf-8", errors="replace"),
+                )
+        qualifier = ".".join(qualifier_parts) or None
+        return qualifier, name
+
     def _julia_short_func_name(self, call_expr) -> Optional[str]:
         """Extract the name from a ``call_expression`` that is the LHS of
         a short-form function ``f(x) = expr`` or ``Base.f(x) = expr`` or
@@ -3381,11 +3431,11 @@ class CodeParser:
         for child in call_expr.children:
             if child.type == "identifier":
                 return child.text.decode("utf-8", errors="replace")
+            if child.type == "operator":
+                return child.text.decode("utf-8", errors="replace")
             if child.type == "field_expression":
-                for ident in reversed(child.children):
-                    if ident.type == "identifier":
-                        return ident.text.decode("utf-8", errors="replace")
-                return None
+                _, name = self._julia_field_info(child)
+                return name
             if child.type == "parametrized_type_expression":
                 for ident in child.children:
                     if ident.type == "identifier":
@@ -3436,6 +3486,55 @@ class CodeParser:
         Returns True if the child was fully handled and should be skipped
         by the main dispatch loop.
         """
+        # Parameterized const aliases are type declarations. Ordinary value
+        # constants stay on the generic path.
+        if node_type == "const_statement":
+            assignment = next(
+                (
+                    sub for sub in child.children
+                    if sub.type == "assignment"
+                ),
+                None,
+            )
+            if assignment is not None and len(assignment.children) >= 3:
+                name_node = assignment.children[0]
+                value_node = assignment.children[-1]
+                if (
+                    name_node.type == "identifier"
+                    and value_node.type in (
+                        "parametrized_type_expression",
+                        "curly_expression",
+                    )
+                ):
+                    name = name_node.text.decode(
+                        "utf-8", errors="replace",
+                    )
+                    qualified = self._qualify(
+                        name, file_path, enclosing_class,
+                    )
+                    nodes.append(NodeInfo(
+                        kind="Type",
+                        name=name,
+                        file_path=file_path,
+                        line_start=child.start_point[0] + 1,
+                        line_end=child.end_point[0] + 1,
+                        language=language,
+                        parent_name=enclosing_class,
+                    ))
+                    container = (
+                        self._qualify(enclosing_class, file_path, None)
+                        if enclosing_class
+                        else file_path
+                    )
+                    edges.append(EdgeInfo(
+                        kind="CONTAINS",
+                        source=container,
+                        target=qualified,
+                        file_path=file_path,
+                        line=child.start_point[0] + 1,
+                    ))
+                    return True
+
         # --- Short-form function: assignment with call_expression LHS ---
         # ``f(x) = expr`` or ``Base.f(x) = expr``.  Anything else with an
         # ``=`` (plain variable, const) is left to the generic path.
@@ -7491,6 +7590,13 @@ class CodeParser:
                                                     "utf-8", errors="replace",
                                                 )
                                 return None
+                        # Generic-function stub: ``function foo end`` has a
+                        # direct identifier in the signature and no call.
+                        for sub in call.children:
+                            if sub.type == "identifier":
+                                return sub.text.decode(
+                                    "utf-8", errors="replace",
+                                )
                 return None
             if node.type in ("struct_definition", "abstract_definition"):
                 for child in node.children:
@@ -7937,6 +8043,19 @@ class CodeParser:
                         parts.append(sub.text.decode("utf-8", errors="replace"))
                 return ".".join(parts)
 
+            def _alias_real_name(alias_node) -> Optional[str]:
+                for sub in alias_node.children:
+                    if sub.type == "as":
+                        break
+                    if sub.type == "identifier":
+                        return sub.text.decode(
+                            "utf-8", errors="replace",
+                        )
+                    if sub.type == "import_path":
+                        path = _import_path_text(sub)
+                        return path or None
+                return None
+
             for child in node.children:
                 if child.type == "identifier":
                     imports.append(
@@ -7946,6 +8065,10 @@ class CodeParser:
                     path = _import_path_text(child)
                     if path:
                         imports.append(path)
+                elif child.type == "import_alias":
+                    real_name = _alias_real_name(child)
+                    if real_name:
+                        imports.append(real_name)
                 elif child.type == "selected_import":
                     module_name: Optional[str] = None
                     seen_colon = False
@@ -7968,6 +8091,12 @@ class CodeParser:
                                     "utf-8", errors="replace",
                                 )
                                 imports.append(f"{module_name}.{imported}")
+                            elif sub.type == "import_alias" and module_name:
+                                real_name = _alias_real_name(sub)
+                                if real_name:
+                                    imports.append(
+                                        f"{module_name}.{real_name}",
+                                    )
         elif language == "gdscript":
             # ``extends Node`` → type > identifier("Node")
             # ``extends "res://path.gd"`` → string literal
