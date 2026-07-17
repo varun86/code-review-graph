@@ -1,6 +1,6 @@
 # Maintainer reconciliation — 2026-07-17
 
-Status: local validation complete; ready for draft review and remote CI.
+Status: local and remote CI validation complete; ready for maintainer review.
 
 Base: `main` at `b72413c`  
 Integration branch: `codex/reconcile-open-contributions-2026-07-17`  
@@ -259,6 +259,8 @@ Completed on the assembled branch:
 - graph review: 25 changed files, risk score `0.65`, 26 affected flows; the
   parser breadth is the main blast radius and received two independent review
   passes plus focused language regressions; and
+- draft PR #624: lint, mypy, Bandit, schema sync, PR Review, GitGuardian, and
+  the Python 3.10, 3.11, 3.12, and 3.13 test jobs all passed; and
 - `git diff --check`: clean.
 
 The independent reviews first found five P1/P2 gaps: the two #569 lifecycle
@@ -277,6 +279,7 @@ Package inspection also found pre-existing maintainer-only `.beads` hooks in the
 sdist; `crg-8u4` tracks the manifest policy fix. Neither is hidden as a passing
 claim.
 
-Windows hook command execution cannot be claimed from this macOS host. The PR
-must remain a draft until GitHub's Python 3.10–3.13 matrix and Windows-relevant
-checks run; source PRs/issues should not be closed before merge.
+Windows hook command execution cannot be claimed from this macOS host or the
+current Linux-only GitHub matrix. The PR should remain a draft pending
+Windows-specific verification and maintainer review; source PRs/issues should
+not be closed before merge.
