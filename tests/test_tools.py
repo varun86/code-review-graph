@@ -1,6 +1,8 @@
 """Tests for MCP tool functions."""
 
+import os
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -22,6 +24,7 @@ from code_review_graph.tools import (
     get_review_context,
     list_communities_func,
     list_flows,
+    list_graph_stats,
     query_graph,
 )
 
@@ -1735,3 +1738,210 @@ class TestGetMinimalContext:
             task="refactor auth module", repo_root=str(self.root),
         )
         assert "refactor" in result["next_tool_suggestions"]
+
+
+class TestGraphProvenance:
+    """Freshness metadata attached to single-repository graph responses."""
+
+    @staticmethod
+    def _make_repo(tmp_path, metadata=None, name="repo"):
+        repo = tmp_path / name
+        repo.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        graph_dir = repo / ".code-review-graph"
+        graph_dir.mkdir()
+        store = GraphStore(graph_dir / "graph.db")
+        try:
+            store.upsert_node(NodeInfo(
+                kind="Function", name="handle", file_path="src/app.py",
+                line_start=1, line_end=3, language="python",
+            ))
+            for key, value in (metadata or {}).items():
+                store.set_metadata(key, value)
+            store.commit()
+        finally:
+            store.close()
+        return repo
+
+    def test_reads_all_metadata_via_read_only_sqlite_uri(
+        self, tmp_path, monkeypatch,
+    ):
+        repo = self._make_repo(tmp_path, {
+            "last_updated": "2000-01-02T03:04:05",
+            "git_branch": "feature/x",
+            "git_head_sha": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+        })
+        real_connect = common_module.sqlite3.connect
+        connection_args = {}
+
+        def recording_connect(database, *args, **kwargs):
+            connection_args.update(database=database, uri=kwargs.get("uri"))
+            return real_connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(common_module.sqlite3, "connect", recording_connect)
+        provenance = common_module.graph_provenance(str(repo))
+
+        assert provenance["updated_at"] == "2000-01-02T03:04:05"
+        assert provenance["built_on_branch"] == "feature/x"
+        assert provenance["built_at_sha"] == (
+            "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+        )
+        assert provenance["age_seconds"] > 0
+        assert connection_args["database"].endswith("?mode=ro")
+        assert connection_args["uri"] is True
+
+    def test_exclusive_lock_fails_soft_promptly(self, tmp_path):
+        repo = self._make_repo(
+            tmp_path, {"last_updated": "2000-01-02T03:04:05"},
+        )
+        db_path = repo / ".code-review-graph" / "graph.db"
+        locker = common_module.sqlite3.connect(db_path)
+        try:
+            # GraphStore uses WAL, where writers do not block readers. Switch
+            # this fixture to rollback journalling so BEGIN EXCLUSIVE models a
+            # build or migration holding a database-wide lock.
+            journal_mode = locker.execute(
+                "PRAGMA journal_mode=DELETE",
+            ).fetchone()[0]
+            assert journal_mode == "delete"
+            locker.execute("BEGIN EXCLUSIVE")
+
+            started = time.monotonic()
+            provenance = common_module.graph_provenance(str(repo))
+            elapsed = time.monotonic() - started
+        finally:
+            locker.rollback()
+            locker.close()
+
+        assert provenance is None
+        assert elapsed < 1.0
+
+    @pytest.mark.parametrize("repo_name", [
+        "repo %40 #fragment",
+        "repo [windows-like] %23 #hash",
+    ])
+    def test_reads_metadata_from_uri_significant_paths(self, tmp_path, repo_name):
+        repo = self._make_repo(
+            tmp_path, {"last_updated": "2000-01-02T03:04:05"}, repo_name,
+        )
+        provenance = common_module.graph_provenance(str(repo))
+        assert provenance["updated_at"] == "2000-01-02T03:04:05"
+
+    @pytest.mark.skipif(os.name != "nt", reason="native Windows path semantics")
+    def test_reads_metadata_from_native_windows_path(self, tmp_path):
+        repo = self._make_repo(
+            tmp_path, {"last_updated": "2000-01-02T03:04:05"},
+            "repo %23 #windows",
+        )
+        assert "\\" in str(repo)
+        provenance = common_module.graph_provenance(str(repo))
+        assert provenance["updated_at"] == "2000-01-02T03:04:05"
+
+    def test_timezone_aware_timestamp_keeps_metadata_and_age(self, tmp_path):
+        repo = self._make_repo(tmp_path, {
+            "last_updated": "2000-01-02T03:04:05+05:30",
+            "git_branch": "feature/timezone",
+            "git_head_sha": "deadbeef",
+        })
+        provenance = common_module.graph_provenance(str(repo))
+
+        assert provenance["updated_at"] == "2000-01-02T03:04:05+05:30"
+        assert provenance["built_on_branch"] == "feature/timezone"
+        assert provenance["built_at_sha"] == "deadbeef"
+        assert provenance["age_seconds"] > 0
+
+    def test_timezone_aware_future_timestamp_clamps_age(self, tmp_path):
+        repo = self._make_repo(
+            tmp_path, {"last_updated": "2999-01-01T00:00:00-07:00"},
+        )
+        assert common_module.graph_provenance(str(repo))["age_seconds"] == 0
+
+    def test_malformed_timestamp_omits_only_age(self, tmp_path):
+        repo = self._make_repo(tmp_path, {
+            "last_updated": "not-a-date",
+            "git_branch": "feature/malformed-time",
+            "git_head_sha": "cafebabe",
+        })
+        assert common_module.graph_provenance(str(repo)) == {
+            "updated_at": "not-a-date",
+            "built_on_branch": "feature/malformed-time",
+            "built_at_sha": "cafebabe",
+        }
+
+    def test_naive_future_timestamp_clamps_age(self, tmp_path):
+        repo = self._make_repo(
+            tmp_path, {"last_updated": "2999-01-01T00:00:00"},
+        )
+        assert common_module.graph_provenance(str(repo))["age_seconds"] == 0
+
+    def test_branch_and_sha_are_optional(self, tmp_path):
+        repo = self._make_repo(
+            tmp_path, {"last_updated": "2000-01-02T03:04:05"},
+        )
+        provenance = common_module.graph_provenance(str(repo))
+        assert "built_on_branch" not in provenance
+        assert "built_at_sha" not in provenance
+
+    def test_missing_last_updated_has_no_envelope(self, tmp_path):
+        repo = self._make_repo(tmp_path, {"git_branch": "main"})
+        assert common_module.graph_provenance(str(repo)) is None
+
+    def test_missing_graph_database_has_no_envelope(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        assert common_module.graph_provenance(str(repo)) is None
+
+    def test_corrupt_graph_database_has_no_envelope(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        graph_dir = repo / ".code-review-graph"
+        graph_dir.mkdir()
+        (graph_dir / "graph.db").write_bytes(b"not a sqlite database")
+        assert common_module.graph_provenance(str(repo)) is None
+
+    def test_invalid_repo_root_has_no_envelope(self, tmp_path):
+        assert common_module.graph_provenance(str(tmp_path / "missing")) is None
+
+    def test_with_provenance_preserves_response_fields(self, tmp_path):
+        repo = self._make_repo(
+            tmp_path, {"last_updated": "2000-01-02T03:04:05"},
+        )
+        response = {"status": "ok", "results": [{"name": "handle"}]}
+        result = common_module.with_provenance(response, str(repo))
+        assert result is response
+        assert result["status"] == "ok"
+        assert result["results"] == [{"name": "handle"}]
+        assert result["_graph"]["updated_at"] == "2000-01-02T03:04:05"
+
+    def test_with_provenance_handles_noop_cases(self, tmp_path):
+        repo_without_metadata = self._make_repo(tmp_path, name="empty")
+        response = {"status": "ok"}
+        assert common_module.with_provenance(
+            response, str(repo_without_metadata),
+        ) == response
+
+        repo = self._make_repo(
+            tmp_path, {"last_updated": "2000-01-02T03:04:05"}, "full",
+        )
+        assert common_module.with_provenance([1, 2], str(repo)) == [1, 2]
+        assert common_module.with_provenance(None, str(repo)) is None
+        existing = {"_graph": {"updated_at": "existing"}}
+        assert common_module.with_provenance(existing, str(repo)) is existing
+        assert existing["_graph"] == {"updated_at": "existing"}
+
+    def test_registered_sync_tool_preserves_existing_fields(self, tmp_path):
+        from code_review_graph.main import list_graph_stats_tool
+
+        repo = self._make_repo(tmp_path, {
+            "last_updated": "2000-01-02T03:04:05",
+            "git_branch": "main",
+        })
+        expected = list_graph_stats(repo_root=str(repo))
+        underlying = getattr(list_graph_stats_tool, "fn", None) or list_graph_stats_tool
+        result = underlying(repo_root=str(repo))
+
+        envelope = result.pop("_graph")
+        assert result == expected
+        assert envelope["updated_at"] == "2000-01-02T03:04:05"
+        assert envelope["built_on_branch"] == "main"
