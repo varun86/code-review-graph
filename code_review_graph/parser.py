@@ -844,8 +844,10 @@ def _csharp_namespaces(root_node) -> list[str]:
     See: #310
     """
     namespaces: list[str] = []
+    stack = [(root_node, None)]
 
-    def _walk(node, parent_namespace: Optional[str] = None) -> None:
+    while stack:
+        node, parent_namespace = stack.pop()
         current_namespace = parent_namespace
         if node.type in (
             "namespace_declaration", "file_scoped_namespace_declaration",
@@ -861,10 +863,10 @@ def _csharp_namespaces(root_node) -> list[str]:
                         )
                         namespaces.append(current_namespace)
                     break
-        for c in node.children:
-            _walk(c, current_namespace)
-
-    _walk(root_node)
+        stack.extend(
+            (child, current_namespace)
+            for child in reversed(node.children)
+        )
     return namespaces
 
 

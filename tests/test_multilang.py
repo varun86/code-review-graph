@@ -578,6 +578,34 @@ class TestCSharpNamespaceResolution:
         importers = {r["file"] for r in result.get("results", [])}
         assert str(app) in importers
 
+    def test_deep_ast_preserves_nested_namespace_metadata(self, tmp_path):
+        """Namespace discovery must not recurse through the whole C# AST."""
+        source_file = tmp_path / "Deep.cs"
+        deep_expression = "(" * 1200 + "1" + ")" * 1200
+        self._write(
+            source_file,
+            "namespace Acme {\n"
+            "    namespace Core {\n"
+            "        public class Calculator {\n"
+            "            public int Value() {\n"
+            f"                return {deep_expression};\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "}\n",
+        )
+
+        try:
+            nodes, _ = CodeParser().parse_file(source_file)
+        except RecursionError:
+            pytest.fail("C# namespace discovery overflowed on a deep expression AST")
+
+        file_node = next(node for node in nodes if node.kind == "File")
+        assert file_node.extra.get("csharp_namespaces") == [
+            "Acme",
+            "Acme.Core",
+        ]
+
 
 class TestRubyParsing:
     def setup_method(self):
