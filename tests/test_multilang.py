@@ -751,7 +751,7 @@ class TestPHPImportResolution:
             "class MatchService {}\n"
         )
 
-        parser = CodeParser()
+        parser = CodeParser(tmp_path)
         _, edges = parser.parse_file(svc / "MatchService.php")
         imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
         assert len(imports) == 1
@@ -788,7 +788,7 @@ class TestPHPImportResolution:
             "use App\\Domain\\Embedded\\Contact as ContactEmbedded;\n"
             "class Job {}\n"
         )
-        parser = CodeParser()
+        parser = CodeParser(tmp_path)
         _, edges = parser.parse_file(job / "Job.php")
         imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
         assert len(imports) == 1
@@ -813,7 +813,7 @@ class TestPHPImportResolution:
             "use App\\Domain\\{Entity\\Job, Model\\Status};\n"
             "class C {}\n"
         )
-        parser = CodeParser()
+        parser = CodeParser(tmp_path)
         _, edges = parser.parse_file(consumer / "C.php")
         targets = {e.target for e in edges if e.kind == "IMPORTS_FROM"}
         assert str((base / "Entity/Job.php").resolve()) in targets

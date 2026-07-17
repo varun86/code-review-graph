@@ -991,7 +991,6 @@ class CodeParser:
         self._module_file_cache: dict[str, Optional[str]] = {}
         self._export_symbol_cache: dict[str, Optional[str]] = {}
         self._tsconfig_resolver = TsconfigResolver()
-        self._repo_root = Path(repo_root).resolve() if repo_root is not None else None
         # Per-parse cache of Dart pubspec root lookups; see #87
         self._dart_pubspec_cache: dict[tuple[str, str], Optional[Path]] = {}
         # Config-driven custom languages (.code-review-graph/languages.toml).
@@ -6949,12 +6948,26 @@ class CodeParser:
             # and ``use function`` / ``use const`` targets with no matching
             # file stay unresolved and keep the bare FQN, like JDK imports.
             rel_path = module.replace("\\", "/").lstrip("/") + ".php"
-            current = caller_dir
-            while True:
-                target = current / rel_path
-                if target.is_file():
-                    return str(target.resolve())
-                if current == current.parent:
+            try:
+                boundary = self._php_repository_boundary(caller_dir)
+                current = caller_dir.resolve()
+            except (OSError, RuntimeError, ValueError):
+                return None
+            if boundary is None or not _path_is_within(current, boundary):
+                return None
+
+            while _path_is_within(current, boundary):
+                try:
+                    target = (current / rel_path).resolve()
+                except (OSError, RuntimeError, ValueError):
+                    target = None
+                if (
+                    target is not None
+                    and _path_is_within(target, boundary)
+                    and target.is_file()
+                ):
+                    return str(target)
+                if current == boundary:
                     break
                 current = current.parent
 

@@ -215,6 +215,80 @@ class TestComposerPsr4:
 
         assert resolved is None
 
+    def test_php_ancestor_fallback_does_not_escape_configured_repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        _write_composer(repo, {"autoload": {"psr-4": {"Other\\": "other/"}}})
+        caller = _write_php(repo / "src/Caller.php")
+        _write_php(tmp_path / "Outside/Foo.php")
+
+        resolved = CodeParser(repo)._resolve_module_to_file(
+            "Outside\\Foo", str(caller), "php",
+        )
+
+        assert resolved is None
+
+    def test_php_ancestor_fallback_without_repo_does_not_climb_above_caller(
+        self, tmp_path,
+    ):
+        caller = _write_php(tmp_path / "project/src/Caller.php")
+        _write_php(tmp_path / "project/Outside/Foo.php")
+
+        resolved = CodeParser()._resolve_module_to_file(
+            "Outside\\Foo", str(caller), "php",
+        )
+
+        assert resolved is None
+
+    def test_php_ancestor_fallback_rejects_symlink_target_outside_repo(
+        self, tmp_path,
+    ):
+        repo = tmp_path / "repo"
+        outside = tmp_path / "outside"
+        _write_composer(repo, {"autoload": {"psr-4": {"Other\\": "other/"}}})
+        caller = _write_php(repo / "src/Caller.php")
+        _write_php(outside / "Foo.php")
+        try:
+            (repo / "src/Outside").symlink_to(
+                outside,
+                target_is_directory=True,
+            )
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"directory symlinks unavailable: {exc}")
+
+        resolved = CodeParser(repo)._resolve_module_to_file(
+            "Outside\\Foo", str(caller), "php",
+        )
+
+        assert resolved is None
+
+    def test_php_ancestor_fallback_fails_soft_when_start_resolution_raises(
+        self, tmp_path, monkeypatch,
+    ):
+        repo = tmp_path / "repo"
+        caller = _write_php(repo / "src/Caller.php")
+        target = _write_php(repo / "src/App/Foo.php")
+        parser = CodeParser(repo)
+        monkeypatch.setattr(
+            parser,
+            "_resolve_php_composer_module",
+            lambda _module, _caller_dir: None,
+        )
+        original_resolve = Path.resolve
+
+        def raise_for_caller(path, *args, **kwargs):
+            if path == caller.parent:
+                raise RuntimeError("synthetic resolution failure")
+            return original_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", raise_for_caller)
+
+        resolved = parser._resolve_module_to_file(
+            "App\\Foo", str(caller), "php",
+        )
+
+        assert target.is_file()
+        assert resolved is None
+
     def test_composer_keeps_existing_php_ancestor_fallback(self, tmp_path):
         repo = tmp_path / "repo"
         _write_composer(repo, {"autoload": {"psr-4": {"Other\\": "other/"}}})
