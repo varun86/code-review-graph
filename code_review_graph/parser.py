@@ -82,6 +82,245 @@ def _load_cargo_manifest(path: Path) -> dict[str, Any]:
         return {}
     return _read_cargo_manifest(str(resolved), stat.st_mtime_ns, stat.st_size)
 
+
+class _PythonScopeBindingVisitor(ast.NodeVisitor):
+    """Collect names bound in one Python lexical scope."""
+
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:  # noqa: N802
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.names.add(node.id)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        self.names.add(node.name)
+
+    def visit_AsyncFunctionDef(  # noqa: N802
+        self,
+        node: ast.AsyncFunctionDef,
+    ) -> None:
+        self.names.add(node.name)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        self.names.add(node.name)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        return
+
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+        for alias in node.names:
+            self.names.add(alias.asname or alias.name.split(".", 1)[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+        for alias in node.names:
+            if alias.name != "*":
+                self.names.add(alias.asname or alias.name)
+
+
+def _python_type_checking_aliases(
+    tree: ast.Module,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Return unshadowed aliases for ``typing.TYPE_CHECKING``."""
+    names: set[str] = set()
+    modules: set[str] = set()
+    shadowed: set[str] = set()
+    for statement in tree.body:
+        if isinstance(statement, ast.Import):
+            for alias in statement.names:
+                if alias.name == "typing":
+                    modules.add(alias.asname or "typing")
+                else:
+                    shadowed.add(
+                        alias.asname or alias.name.split(".", 1)[0],
+                    )
+        elif isinstance(statement, ast.ImportFrom) and statement.module == "typing":
+            for alias in statement.names:
+                if alias.name == "TYPE_CHECKING":
+                    names.add(alias.asname or alias.name)
+                elif alias.name != "*":
+                    shadowed.add(alias.asname or alias.name)
+        else:
+            bindings = _PythonScopeBindingVisitor()
+            bindings.visit(statement)
+            shadowed.update(bindings.names)
+    return frozenset(names - shadowed), frozenset(modules - shadowed)
+
+
+def _python_static_truth(
+    node: ast.expr,
+    type_checking_names: frozenset[str] = frozenset(),
+    typing_modules: frozenset[str] = frozenset(),
+) -> Optional[bool]:
+    """Return a truth value for the small constant subset we can prove."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (bool, int)):
+        return bool(node.value)
+    if isinstance(node, ast.Name) and node.id in type_checking_names:
+        return False
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr == "TYPE_CHECKING"
+        and isinstance(node.value, ast.Name)
+        and node.value.id in typing_modules
+    ):
+        return False
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        value = _python_static_truth(
+            node.operand,
+            type_checking_names,
+            typing_modules,
+        )
+        return None if value is None else not value
+    if isinstance(node, ast.BoolOp):
+        values = [
+            _python_static_truth(
+                value,
+                type_checking_names,
+                typing_modules,
+            )
+            for value in node.values
+        ]
+        if isinstance(node.op, ast.And):
+            if False in values:
+                return False
+            return True if all(value is True for value in values) else None
+        if isinstance(node.op, ast.Or):
+            if True in values:
+                return True
+            return False if all(value is False for value in values) else None
+    return None
+
+
+class _PythonUnreachableCallVisitor(ast.NodeVisitor):
+    """Collect calls inside branches whose condition is statically false."""
+
+    def __init__(
+        self,
+        type_checking_names: frozenset[str],
+        typing_modules: frozenset[str],
+    ) -> None:
+        self._dead = False
+        self.positions: set[tuple[int, int]] = set()
+        self._type_checking_names = type_checking_names
+        self._typing_modules = typing_modules
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        if self._dead:
+            self.positions.add((node.lineno, node.col_offset))
+        self.generic_visit(node)
+
+    def visit_If(self, node: ast.If) -> None:  # noqa: N802
+        self.visit(node.test)
+        truth = _python_static_truth(
+            node.test,
+            self._type_checking_names,
+            self._typing_modules,
+        )
+        self._visit_statements(node.body, dead=truth is False)
+        self._visit_statements(node.orelse, dead=truth is True)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(  # noqa: N802
+        self,
+        node: ast.AsyncFunctionDef,
+    ) -> None:
+        self._visit_function(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword in node.keywords:
+            self.visit(keyword.value)
+
+        bindings = _PythonScopeBindingVisitor()
+        for statement in node.body:
+            bindings.visit(statement)
+        outer_names = self._type_checking_names
+        outer_modules = self._typing_modules
+        self._type_checking_names = outer_names - bindings.names
+        self._typing_modules = outer_modules - bindings.names
+        self._visit_statements(node.body, dead=False)
+        self._type_checking_names = outer_names
+        self._typing_modules = outer_modules
+
+    def _visit_function(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+        all_args = (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        )
+        for argument in all_args:
+            if argument.annotation is not None:
+                self.visit(argument.annotation)
+        for optional_argument in (node.args.vararg, node.args.kwarg):
+            if (
+                optional_argument is not None
+                and optional_argument.annotation is not None
+            ):
+                self.visit(optional_argument.annotation)
+        if node.returns is not None:
+            self.visit(node.returns)
+
+        bindings = _PythonScopeBindingVisitor()
+        for statement in node.body:
+            bindings.visit(statement)
+        bindings.names.update(argument.arg for argument in all_args)
+        bindings.names.update(
+            argument.arg
+            for argument in (node.args.vararg, node.args.kwarg)
+            if argument is not None
+        )
+
+        outer_names = self._type_checking_names
+        outer_modules = self._typing_modules
+        self._type_checking_names = outer_names - bindings.names
+        self._typing_modules = outer_modules - bindings.names
+        self._visit_statements(node.body, dead=False)
+        self._type_checking_names = outer_names
+        self._typing_modules = outer_modules
+
+    def _visit_statements(
+        self,
+        statements: list[ast.stmt],
+        *,
+        dead: bool,
+    ) -> None:
+        outer_dead = self._dead
+        self._dead = outer_dead or dead
+        for statement in statements:
+            self.visit(statement)
+        self._dead = outer_dead
+
+
+@lru_cache(maxsize=128)
+def _python_unreachable_call_positions(
+    source: bytes,
+) -> frozenset[tuple[int, int]]:
+    """Return one-based line/byte-column positions of proven-dead calls."""
+    try:
+        tree = ast.parse(source.decode("utf-8"))
+    except (SyntaxError, UnicodeDecodeError, ValueError):
+        return frozenset()
+    type_checking_names, typing_modules = _python_type_checking_aliases(tree)
+    visitor = _PythonUnreachableCallVisitor(
+        type_checking_names,
+        typing_modules,
+    )
+    visitor.visit(tree)
+    return frozenset(visitor.positions)
+
 # SQL keywords that can appear after FROM/JOIN but are NOT table names.
 _SQL_KEYWORDS: frozenset[str] = frozenset({
     "SELECT", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET",
@@ -8114,10 +8353,18 @@ class CodeParser:
     ) -> bool:
         """Extract call expressions, including test runner special cases.
 
-        Returns True if the child was fully handled (test runner call that
-        should skip default recursion). Returns False if the caller should
-        continue to Solidity handling and default recursion.
+        Returns True if the child was fully handled (a test runner call or a
+        statically unreachable Python call that should skip default
+        recursion). Returns False if the caller should continue to Solidity
+        handling and default recursion.
         """
+        if (
+            language == "python"
+            and (child.start_point[0] + 1, child.start_point[1])
+            in _python_unreachable_call_positions(source)
+        ):
+            return True
+
         call_name = self._get_call_name(child, language, source)
 
         # For member expressions like describe.only / it.skip / test.each,
