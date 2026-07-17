@@ -539,6 +539,45 @@ class TestCSharpNamespaceResolution:
         assert str(app) in importers
         assert str(unrelated) not in importers
 
+    def test_importers_of_resolves_nested_block_namespace(self, tmp_path):
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.tools.query import query_graph
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".code-review-graph").mkdir()
+        core = tmp_path / "Core.cs"
+        self._write(
+            core,
+            "namespace Acme {\n"
+            "    namespace Core {\n"
+            "        public class TaskBoard {}\n"
+            "    }\n"
+            "}\n",
+        )
+        app = tmp_path / "App.cs"
+        self._write(
+            app,
+            "using Acme.Core;\n"
+            "namespace Acme.App;\n"
+            "public class App {}\n",
+        )
+
+        store = GraphStore(tmp_path / ".code-review-graph" / "graph.db")
+        parser = CodeParser()
+        for path in (core, app):
+            nodes, edges = parser.parse_file(path)
+            for node in nodes:
+                store.upsert_node(node)
+            for edge in edges:
+                store.upsert_edge(edge)
+        store.commit()
+        store.close()
+
+        result = query_graph("importers_of", str(core), repo_root=str(tmp_path))
+        assert result.get("status") == "ok"
+        importers = {r["file"] for r in result.get("results", [])}
+        assert str(app) in importers
+
 
 class TestRubyParsing:
     def setup_method(self):
@@ -2908,6 +2947,40 @@ class TestZigParsing:
         assert len(tests) == 1
         assert tests[0].name.startswith("test:helper increments@L")
         assert tests[0].is_test is True
+
+    def test_in_source_test_emits_tested_by_outside_test_path(self):
+        path = Path("src/math.zig")
+        nodes, edges = self.parser.parse_bytes(
+            path,
+            b"fn increment(x: i32) i32 { return x + 1; }\n"
+            b'test "increment" { try expect(increment(1) == 2); }\n',
+        )
+
+        file_node = next(n for n in nodes if n.kind == "File")
+        test_node = next(n for n in nodes if n.kind == "Test")
+        function_node = next(
+            n for n in nodes if n.kind == "Function" and n.name == "increment"
+        )
+        test_qname = self.parser._qualify(
+            test_node.name, test_node.file_path, test_node.parent_name,
+        )
+        function_qname = self.parser._qualify(
+            function_node.name, function_node.file_path, function_node.parent_name,
+        )
+
+        assert file_node.is_test is False
+        assert any(
+            edge.kind == "CALLS"
+            and edge.source == test_qname
+            and edge.target == function_qname
+            for edge in edges
+        )
+        assert any(
+            edge.kind == "TESTED_BY"
+            and edge.source == function_qname
+            and edge.target == test_qname
+            for edge in edges
+        )
 
     def test_calls_inside_methods_have_qualified_source(self):
         # Point.distance calls helper(...) — the source should be the

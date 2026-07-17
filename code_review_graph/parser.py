@@ -845,7 +845,8 @@ def _csharp_namespaces(root_node) -> list[str]:
     """
     namespaces: list[str] = []
 
-    def _walk(node) -> None:
+    def _walk(node, parent_namespace: Optional[str] = None) -> None:
+        current_namespace = parent_namespace
         if node.type in (
             "namespace_declaration", "file_scoped_namespace_declaration",
         ):
@@ -853,10 +854,15 @@ def _csharp_namespaces(root_node) -> list[str]:
                 if c.type in ("qualified_name", "identifier"):
                     text = c.text.decode("utf-8", errors="replace").strip()
                     if text:
-                        namespaces.append(text)
+                        current_namespace = (
+                            f"{parent_namespace}.{text}"
+                            if parent_namespace
+                            else text
+                        )
+                        namespaces.append(current_namespace)
                     break
         for c in node.children:
-            _walk(c)
+            _walk(c, current_namespace)
 
     _walk(root_node)
     return namespaces
@@ -1112,12 +1118,12 @@ class CodeParser:
 
         # Generate TESTED_BY edges: when a test function calls a production
         # function, create an edge from the production function back to the test.
-        if test_file:
-            test_qnames = set()
-            for n in nodes:
-                if n.is_test:
-                    qn = self._qualify(n.name, n.file_path, n.parent_name)
-                    test_qnames.add(qn)
+        test_qnames = set()
+        for n in nodes:
+            if n.is_test:
+                qn = self._qualify(n.name, n.file_path, n.parent_name)
+                test_qnames.add(qn)
+        if test_qnames:
             for edge in list(edges):
                 if edge.kind == "CALLS" and edge.source in test_qnames:
                     edges.append(EdgeInfo(
